@@ -6,13 +6,13 @@ use rust_decimal::Decimal;
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OrderType {
     Bid, // buy
     Ask // sell
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Order {
     id: String,
     size: f32,
@@ -45,34 +45,25 @@ impl Order {
 
 
 #[derive(Debug)]
-struct LimitOrders {
+pub struct PriceLevel {
     price: Decimal, // probably not needed. used to sort limit orders.
     orders: Vec<Order> // linkedlist? doesnt need to be sorted or searched.
 }
 
-impl LimitOrders {
-    fn new(price: Decimal) -> LimitOrders {
-        LimitOrders { price, orders: Vec::new() }
+impl PriceLevel {
+    fn new(price: Decimal) -> PriceLevel {
+        PriceLevel { price, orders: Vec::new() }
     }
 
     fn add_order(&mut self, order: Order) {
         self.orders.push(order)
     }
 
-    fn fill_market_order(&mut self, market_order: &mut Order) {
-        for order in self.orders {
-            match order.size >= market_order.size {
-                true => {
-                    order.size -= market_order.size;
-                    market_order.size = 0.0;
-                },
+    fn fill_order(&mut self, target_order: &mut Order) {
+        for order in self.orders.iter_mut() {
+            order.fill_order(target_order);
 
-                false => {
-                    market_order.size -= order.size;
-                    order.size = 0.0;
-                }
-            }
-            if market_order.is_filled() {
+            if target_order.is_filled() {
                 break;
             }
         }
@@ -82,15 +73,15 @@ impl LimitOrders {
         self.orders.iter().map(|order| order.size).sum()
     }
 
-    fn cmp(&self, other: &LimitOrders) -> Ordering {
+    fn cmp(&self, other: &PriceLevel) -> Ordering {
         self.price.cmp(&other.price)
     }
 }
 
 #[derive(Debug)]
 pub struct Orderbook {
-    bids: HashMap<Decimal, LimitOrders>,
-    asks: HashMap<Decimal, LimitOrders>
+    bids: HashMap<Decimal, PriceLevel>,
+    asks: HashMap<Decimal, PriceLevel>
 }
 
 impl Orderbook {
@@ -98,14 +89,15 @@ impl Orderbook {
         Orderbook { bids: HashMap::new(), asks: HashMap::new() }
     }
 
-    pub fn add_limit_order(&mut self, price:Decimal, order: Order) {
+    pub fn add_limit_order(&mut self, price: Decimal, order: Order) {
+        // 2 solutions with the same result.
         match order.side {
             OrderType::Bid => {
                 match self.bids.get_mut(&price) {
                     Some(limit_orders) => limit_orders.add_order(order),
 
                     None => {
-                        let mut limit = LimitOrders::new(price);
+                        let mut limit = PriceLevel::new(price);
                         limit.add_order(order);
                         self.bids.insert(price, limit);
                     }
@@ -114,7 +106,7 @@ impl Orderbook {
 
             OrderType::Ask => {
                 if !self.asks.contains_key(&price){
-                    self.asks.insert(price, LimitOrders::new(price));
+                    self.asks.insert(price, PriceLevel::new(price));
                 }
 
                 self.asks.get_mut(&price).unwrap().add_order(order);
@@ -122,29 +114,60 @@ impl Orderbook {
         }
     }
 
-    pub fn fill_market_order(&mut self, market_order: &mut Order, side: OrderType) {
-        let mut limit_orders = match side {
-            OrderType::Bid => self.sorted_bids(),
-            OrderType::Ask => self.sorted_asks()
+    pub fn fill_market_order(&mut self, market_order: &mut Order) {
+        let price_levels = match market_order.side {
+            OrderType::Bid => self.sorted_asks(),
+            OrderType::Ask => self.sorted_bids()
         };
 
-        for limit_order in limit_orders {
-            for order in limit_order.orders {
-                order.fill_order(market_order);
+        for price_level in price_levels {
+            price_level.fill_order(market_order);
 
-                if market_order.is_filled() {
-                    break;
-                }
+            if market_order.is_filled() {
+                println!("Market Order Filled!");
+                break;
             }
+        }
+
+        // remove empty price levels
+    }
+
+    pub fn fill_limit_order(&mut self, limit_order: &mut Order, price: Decimal) {
+        let price_levels = match limit_order.side {
+            OrderType::Bid => &mut self.asks,
+            OrderType::Ask => &mut self.bids
+        };
+
+        let price_level = match price_levels.get_mut(&price) {
+            Some(price_level) => price_level,
+            None => {
+                self.add_limit_order(price, limit_order.clone()); 
+                return
+            }
+        };
+
+        price_level.fill_order(limit_order);
+
+        if !limit_order.is_filled() {
+            println!("Limit Order NOT Filled! {:?}", limit_order);
+
+            self.add_limit_order(price, limit_order.clone());
+        } else {
+            println!("Limit Order Filled!");
         }
     }
 
+    pub fn sorted_asks(&mut self) -> Vec<&mut PriceLevel> { // ascd
+        let mut asks = self.asks.values_mut().collect::<Vec<&mut PriceLevel>>();
+        asks.sort_by(|a,b| a.price.cmp(&b.price));
 
-    fn sorted_asks(&self) -> Vec<LimitOrders> {
-        self.asks.values().collect().sort()
+        asks
     }
 
-    fn sorted_bids(&self) -> Vec<LimitOrders> {
-        self.bids.values().collect().sort()
+    pub fn sorted_bids(&mut self) -> Vec<&mut PriceLevel> { // desc
+        let mut bids = self.bids.values_mut().collect::<Vec<&mut PriceLevel>>();
+        bids.sort_by(|a,b| b.price.cmp(&a.price));
+
+        bids
     }
 }
